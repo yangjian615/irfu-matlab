@@ -52,19 +52,19 @@ classdef mms_local_file_db < mms_file_db
         list_ancillary();
         if isempty(fileList) || isempty(tint), return, end
         pick_ancillary();
-			else
-				if mms.db_index && ~isempty(obj.index)
-					irf.log('notice','Using index');
-					fileList = obj.index.search_files_with_dataset(filePrefix,tint);
-					return
-				else
-					if ~isempty(tint)
-						list_sci_tint()
-					else
-						irf.log('warning','THIS MAY TAKE SOME TIME')
-						list_sci()
-					end
-				end
+      else
+        if mms.db_index && ~isempty(obj.index)
+          irf.log('notice','Using index');
+          fileList = obj.index.search_files_with_dataset(filePrefix,tint);
+          return
+        else
+          if ~isempty(tint)
+            list_sci_tint();
+          else
+            irf.log('warning','THIS MAY TAKE SOME TIME');
+            list_sci();
+          end
+        end
       end
       % END LIST_FILES
       %% PICK ANCILLARY
@@ -174,6 +174,7 @@ classdef mms_local_file_db < mms_file_db
       function list_sci_tint()
         fDir = get_prefix();
         TStart = get_times(tint.start); TStop = get_times(tint.stop);
+        dateFormat=[]; startFile=[]; stopFile=[];
         for year = TStart.year:TStop.year
           moStart = 1; moStop = 12;
           if year==TStart.year, moStart = TStart.month; end
@@ -184,31 +185,26 @@ classdef mms_local_file_db < mms_file_db
             if (year==TStart.year && mo==TStart.month) || ...
                 (year==TStop.year && mo==TStop.month)
               dStart = 1; dStop = 31;
-              if year==TStart.year && mo==TStart.month
-                dStart = TStart.day;
-              end
-              if year==TStop.year && mo==TStop.month, dStop = TStop.day;end
-              for day = dStart:dStop
-                if strcmpi(C{3},'brst')
-                  curDir = [moDir filesep sprintf('%02d',day)]; % BRST files are in daily subdirs
+              if year==TStart.year && mo==TStart.month, dStart=TStart.day; end
+              if year==TStop.year && mo==TStop.month, dStop = TStop.day; end
+              if strcmp(C{3}, 'brst')
+                for day = dStart:dStop
+                  % BRST files are in daily subdirs
+                  curDir = [moDir filesep sprintf('%02d',day)];
+                  dPref = sprintf('%s_%d%02d%02d',filePrefix,year,mo,day);
+                  limited_sci_list;
                 end
-                dPref = sprintf('%s_%d%02d%02d',filePrefix,year,mo,day);
-                listingD = mms_find_latest_version_cdf([curDir filesep dPref '*.cdf']);
-                if isempty(listingD), continue, end
-                arrayfun(@(x) add2list_sci(x.name,curDir), listingD)
+              else
+                %Fast, slow, srvy, comm
+                dPref = sprintf('%s_%d%02d',filePrefix,year,mo);
+                limited_sci_list;
               end
-            else % List all files
-              dPref = sprintf('%s_%d%02d',filePrefix,year,mo);
-              listingD = mms_find_latest_version_cdf([curDir filesep dPref '*.cdf']);
-              if isempty(listingD), continue, end
-              arrayfun(@(x) add2list_sci(x.name,curDir), listingD)
             end
           end
         end
-        
+
         function p = get_prefix()
-          p = obj.dbRoot;
-          for ix=1:length(C), p = [p filesep C{ix}]; end %#ok<AGROW>
+          p = [obj.dbRoot, filesep, strjoin(C, filesep)];
         end
         function t = get_times(tt)
           utc = tt.toUtc();
@@ -219,12 +215,49 @@ classdef mms_local_file_db < mms_file_db
           t.min   = str2double(utc(15:16));
           t.sec   = str2double(utc(18:end-1));
         end
+        function limited_sci_list()
+          listingD = mms_find_latest_version_cdf([curDir filesep dPref '*.cdf']);
+          if isempty(listingD), return, end
+          if isempty(dateFormat)
+            % Are we looking for files with 8 or the full 14 digits
+            % in the date and time.
+            fileformat = regexp(listingD(1).name, '_(?<dateFormat>\d{8,})_v','names');
+            switch length(fileformat.dateFormat)
+              case 8
+                dateFormat = 'yyyymmdd';
+              case 14
+                dateFormat = 'yyyymmddHHMMSS';
+              otherwise
+                dateFormat = 'yyyymmddHHMMSS';
+            end
+            % Create reconstructed file names for our interval
+            startFile = [filePrefix, '_', tint.start.toUtc(dateFormat), '_v0.0.0.cdf'];
+            stopFile = [filePrefix, '_', tint.stop.toUtc(dateFormat), '_v9999999.999999.999999.cdf'];
+          end
+          % Find index of files with names which timewise are sorted
+          % between our "startFile" and "stopFile" names.
+          indAfterStart = arrayfun(@(x) isequal({startFile; x.name}, sort({startFile; x.name})), listingD);
+          indBeforeStop = arrayfun(@(x) isequal({x.name;  stopFile}, sort({x.name;  stopFile})), listingD);
+          % Also look at files just before and after as it might be some
+          % overlap.
+          indLast = find(indBeforeStop, 1, 'last');
+          if(indLast<length(listingD)), indBeforeStop(indLast+1) = true; end
+          indFirst = find(indAfterStart, 1, 'first');
+          if isempty(indFirst)
+            indAfterStart(end) = true;
+          elseif indFirst>1
+            indAfterStart(indFirst-1) = true;
+          end
+          tmpIndex= find(bitand(indBeforeStop, indAfterStart));
+          if isempty(tmpIndex), return, end
+          listingD = listingD(tmpIndex);
+          arrayfun(@(x) add2list_sci(x.name,curDir), listingD)
+        end
       end
       
       %% LIST SCI
       function list_sci()
-        fileDir = obj.dbRoot;
-        for i=1:length(C), fileDir = [fileDir filesep C{i}]; end %#ok<AGROW>
+        fileDir = [obj.dbRoot, filesep, strjoin(C, filesep)];
         if exist(fileDir,'dir')~=7, return, end
         listingY = dir(fileDir); listingY(~[listingY.isdir]) = [];
         for iDir = 1:length(listingY)
@@ -270,13 +303,10 @@ classdef mms_local_file_db < mms_file_db
         hasFile = arrayfun(@(x) ~isempty(strfind(x.name,fName)),fileList);
         if ~any(hasFile), fileList = [fileList add_ss(Entry)]; return, end
         iSame = find(hasFile);
-        if length(iSame) > 1
-          error('multiple files with same name'),
+        if length(iSame)>1, error('multiple files with same name'); end
+        if is_version_larger(fnd.vXYZ,fileList(iSame).ver)
+          fileList(iSame) = add_ss(Entry); % replace file
         end
-        
-				if is_version_larger(fnd.vXYZ,fileList(iSame).ver)
-					fileList(iSame) = add_ss(Entry); % replace file
-				end
         function entry = add_ss(entry)
           entryTmp = obj.cache.get_by_key(entry.name);
           if ~isempty(entryTmp)
@@ -326,12 +356,12 @@ classdef mms_local_file_db < mms_file_db
       narginchk(2,3)
       
       irf.log('notice',['loading ' fileName])
-			if mms.db_index
-				fileNameFullPath = fileName;
-			else
-				p = obj.get_path_to_file(fileName);
-				fileNameFullPath = [p filesep fileName];
-			end
+      if mms.db_index
+        fileNameFullPath = fileName;
+      else
+        p = obj.get_path_to_file(fileName);
+        fileNameFullPath = [p filesep fileName];
+      end
       if mms_local_file_db.is_cdf_file(fileName)
         res = dataobj(fileNameFullPath);
         return
@@ -354,13 +384,13 @@ classdef mms_local_file_db < mms_file_db
         res = any(cellfun(@(x) strcmp(x,varName), entryTmp.vars(:,1)));
         return
       end
-			if mms.db_index
-				irf.log('notice','Using index to check if file ok');
-				fullPath = fileName;
-			else
-				p = obj.get_path_to_file(fileName); 
-				fullPath = [p filesep fileName];
-			end
+      if mms.db_index
+        irf.log('notice','Using index to check if file ok');
+        fullPath = fileName;
+      else
+        p = obj.get_path_to_file(fileName);
+        fullPath = [p filesep fileName];
+      end
       if ~exist(fullPath,'file')
         irf.log('warning', ['Fies does not exist: ' fullPath])
         return
@@ -379,18 +409,18 @@ classdef mms_local_file_db < mms_file_db
         return
       end
       % cdf
-			if mms.db_index
-				res = obj.index.file_has_var(fileName,varName);
-			else
-				info = spdfcdfinfo(fullPath);
-                if ispc
-                  % Add a very short delay to ensure consecutive files are not
-                  % accessed TOO quickly as this may cause Matlab to experince a
-                  % hard crash on Win10 regardless of the try&catch.
-                  pause(0.0001);
-                end
-				res = any(cellfun(@(x) strcmp(x,varName), info.Variables(:,1)));
-			end
+      if mms.db_index
+        res = obj.index.file_has_var(fileName,varName);
+      else
+        info = spdfcdfinfo(fullPath);
+        if ispc
+          % Add a very short delay to ensure consecutive files are not
+          % accessed TOO quickly as this may cause Matlab to experince a
+          % hard crash on Win10 regardless of the try&catch.
+          pause(0.0001);
+        end
+        res = any(cellfun(@(x) strcmp(x,varName), info.Variables(:,1)));
+      end
     end
   end
   
